@@ -88,10 +88,11 @@ function redirect_domain_ports() { # redirect_domain_ports "9443 8443" "8080"
 
 function save_firewall() {
     mkdir -p /etc/iptables/
-    # Drop repeated rules, but keep every table's header and COMMIT (filter and nat have their own).
-    iptables-save | awk '/^(\*|COMMIT)/ || !seen[$0]++' >/etc/iptables/rules.v4
+    # Drop repeated rules, resetting dedup state at each table header so
+    # same-named chains in different tables (e.g. :DOCKER in filter and nat) survive.
+    iptables-save | awk '/^\*/ {delete seen; print; next} /^COMMIT$/ {print; next} !seen[$0]++' >/etc/iptables/rules.v4
     if has_ipv6; then
-        ip6tables-save | awk '/^(\*|COMMIT)/ || !seen[$0]++' >/etc/iptables/rules.v6
+        ip6tables-save | awk '/^\*/ {delete seen; print; next} /^COMMIT$/ {print; next} !seen[$0]++' >/etc/iptables/rules.v6
         ip6tables-restore </etc/iptables/rules.v6
     fi
     iptables-restore </etc/iptables/rules.v4
