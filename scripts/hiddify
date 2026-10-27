@@ -1,0 +1,113 @@
+#!/bin/bash
+# Hiddify Manager CLI. Installed as /usr/bin/hiddify
+HIDDIFY_DIR="${HIDDIFY_DIR:-/opt/hiddify-manager}"
+SCRIPTS="$HIDDIFY_DIR/scripts"
+
+usage() {
+    cat <<EOF
+Usage: hiddify [command] [options]
+
+Commands:
+  install           Install or reinstall Hiddify Manager
+  apply             Apply panel configs to the system
+  upgrade           Upgrade Hiddify Manager
+  start               Start Hiddify services
+  stop              Stop all Hiddify services
+  restart           Restart services
+  status            Show service status
+  sync-configs      Regenerate server configs from the panel
+  uninstall         Uninstall Hiddify Manager
+  admin             Show admin panel links
+  reset-password    Reset the owner admin password
+
+If no command is given, the interactive menu is shown.
+
+Hints:
+  hiddify admin
+  hiddify reset-password
+  Open a Secure https admin link in the browser (avoid the http/IP ones if a domain link works).
+
+Examples:
+  hiddify
+  hiddify install --no-gui
+  hiddify upgrade release
+  hiddify apply --no-gui
+  hiddify sync-configs
+  hiddify admin
+  hiddify reset-password    
+  hiddify uninstall
+  hiddify start
+  hiddify stop
+  hiddify restart
+  hiddify status
+EOF
+}
+
+cmd="${1:-}"
+if [[ -n "$cmd" ]]; then
+    shift
+fi
+
+case "$cmd" in
+-h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
+cd "$HIDDIFY_DIR" || {
+    echo "Hiddify Manager is not installed at $HIDDIFY_DIR" >&2
+    exit 1
+}
+
+case "$cmd" in
+"" | menu)
+    exec bash "$SCRIPTS/menu.sh" "$@"
+    ;;
+install)
+    exec bash "$SCRIPTS/install.sh" "$@"
+    ;;
+start)
+    HIDDIFY_SYSTEMCTL_ACTION=start exec bash "$SCRIPTS/restart.sh" "$@"
+    ;;
+stop)
+    HIDDIFY_SYSTEMCTL_ACTION=stop exec bash "$SCRIPTS/restart.sh" "$@"
+    ;;
+upgrade | update)
+    exec bash "$SCRIPTS/update.sh" "$@"
+    ;;
+status)
+    exec bash "$SCRIPTS/status.sh" "$@"
+    ;;
+restart)
+    exec bash "$SCRIPTS/restart.sh" "$@"
+    ;;
+apply)
+    exec bash "$SCRIPTS/apply_configs.sh" "$@"
+    ;;
+sync-configs | sync-config)
+    exec bash "$SCRIPTS/sync_configs.sh" "$@"
+    ;;
+uninstall)
+    exec bash "$SCRIPTS/uninstall.sh" "$@"
+    ;;
+admin)
+    # shellcheck source=/opt/hiddify-manager/scripts/common/utils.sh
+    source "$SCRIPTS/common/utils.sh"
+    check_hiddify_panel
+    echo
+    echo "Hint: hiddify reset-password"
+    ;;
+reset-password)
+    # shellcheck source=/opt/hiddify-manager/scripts/common/utils.sh
+    source "$SCRIPTS/common/utils.sh"
+    echo "resetting owner password..."
+    hiddify-panel-cli reset-owner-password
+    ;;
+*)
+    echo "Unknown command: $cmd" >&2
+    echo >&2
+    usage >&2
+    exit 1
+    ;;
+esac

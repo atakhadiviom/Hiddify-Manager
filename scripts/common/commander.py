@@ -1,0 +1,209 @@
+#!/opt/hiddify-manager/.venv313/bin/python
+import os
+import subprocess
+import time
+
+import click
+from strenum import StrEnum
+
+HIDDIFY_DIR = "/opt/hiddify-manager/"
+
+
+class Command(StrEnum):
+    """The value of each command refers to the command shell file"""
+
+    apply = os.path.join(HIDDIFY_DIR, "scripts/apply_configs.sh")
+
+    install = os.path.join(HIDDIFY_DIR, "scripts/install.sh")
+    # reinstall = os.path.join(HIDDIFY_DIR,'reinstall.sh')
+    update = os.path.join(HIDDIFY_DIR, "scripts/update.sh")
+    status = os.path.join(HIDDIFY_DIR, "scripts/status.sh")
+    restart_services = os.path.join(HIDDIFY_DIR, "scripts/restart.sh")
+    temporary_access = os.path.join(HIDDIFY_DIR, "services/panel/temporary_access.sh")
+    update_usage = os.path.join(HIDDIFY_DIR, "services/panel/update_usage.sh")
+    # apply-users command is actually "install.sh apply_users"
+    apply_users = os.path.join(HIDDIFY_DIR, "scripts/apply_users.sh")
+    id = "id"
+
+
+def systemd_available() -> bool:
+    return os.path.isdir("/run/systemd/system")
+
+
+def _service_name(unit: str) -> str:
+    return unit if unit.endswith(".service") else f"{unit}.service"
+
+
+def _run_direct(cmd: list[str]) -> None:
+    subprocess.run(cmd, shell=False, check=True)
+
+
+def run_isolated(cmd: list[str], unit: str, wait_if_active: bool = False) -> None:
+    """Run *cmd* in a transient systemd unit so it is not in the panel cgroup.
+
+    ``systemctl kill`` / ``systemctl restart hiddify-panel`` SIGTERMs every
+    process in that cgroup. apply/install used to be children of the panel
+    service, so they died before progress 100 and left the unit failed.
+    """
+    service = _service_name(unit)
+    subprocess.run(
+        ["systemctl", "reset-failed", service],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def active() -> bool:
+        return subprocess.run(["systemctl", "is-active", "--quiet", service], check=False).returncode == 0
+
+    if wait_if_active:
+        # A change made while the previous run was working may not be in it: run again once it is done.
+        deadline = time.monotonic() + 900
+        while active() and time.monotonic() < deadline:
+            time.sleep(1)
+    if active():
+        return
+    isolated = [
+        "systemd-run",
+        f"--unit={unit}",
+        "--collect",
+        "--wait",
+        "--",
+        *cmd,
+    ]
+    try:
+        subprocess.run(isolated, shell=False, check=True)
+    except FileNotFoundError:
+        _run_direct(cmd)
+
+
+def _with_interpreter(cmd: list[str]) -> list[str]:
+    """Shell scripts run through bash: a copy that lost its executable bit (an update, a manual copy) still runs."""
+    return ["/bin/bash", *cmd] if cmd and cmd[0].endswith(".sh") else cmd
+
+
+def run(cmd: list[str], unit: str | None = None, wait_if_active: bool = False):
+    cmd = _with_interpreter(cmd)
+    if unit and systemd_available():
+        run_isolated(cmd, unit, wait_if_active)
+        return
+    _run_direct(cmd)
+
+
+@click.group(chain=True)
+def cli():
+    pass
+
+
+@cli.command("id")
+def id():
+    out = subprocess.check_output(["id"])
+    print(out.decode())
+
+
+@cli.command("apply")
+def apply():
+    cmd = [Command.apply.value, "--no-gui"]
+    run(cmd, unit="hiddify-apply")
+
+
+@cli.command("install")
+def install():
+    cmd = [Command.install.value, "--no-gui"]
+    run(cmd, unit="hiddify-install")
+
+
+# @cli.command('reinstall')
+# def reinstall():
+#     cmd = [Command.reinstall.value]
+#     run(cmd)
+
+
+@cli.command("update")
+def update():
+    cmd = [Command.update.value, "--no-gui"]
+    run(cmd, unit="hiddify-update")
+
+
+@cli.command("restart-services")
+def restart_services():
+    cmd = [Command.restart_services.value, "--no-gui"]
+    run(cmd)
+
+
+@cli.command("status")
+def status():
+    cmd = [Command.status.value, "--no-gui"]
+    run(cmd)
+
+
+# @cli.command('temporary-access')
+# @click.option('--port', '-p', type=int, help='The port that is going to be open', required=True)
+# def add_temporary_access(port: int):
+#     cmd = [Command.temporary_access.value, str(port)]
+#     run(cmd)
+
+
+@cli.command("port-owner")
+@click.option("--port", "-p", type=click.IntRange(1, 65535), help="The TCP port to look up", required=True)
+def port_owner(port: int):
+    """Print the name of each process listening on PORT (one per line; nothing when the port is free)."""
+    out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fc"], capture_output=True, text=True, check=False).stdout
+    for name in sorted({line[1:] for line in out.splitlines() if line.startswith("c")}):
+        print(name)
+
+
+LOG_DIR = os.path.join(HIDDIFY_DIR, "data", "log")
+
+
+def log_path(name: str) -> str:
+    """A log file directly in data/log, by its bare name: no path, no symlink, nothing outside it."""
+    if not name or name != os.path.basename(name) or name.startswith(".") or not all(c.isalnum() or c in "._-" for c in name):
+        raise click.BadParameter(f"invalid log name: {name!r}")
+    path = os.path.join(LOG_DIR, name)
+    if os.path.islink(path) or not os.path.isfile(path) or os.path.dirname(os.path.realpath(path)) != os.path.realpath(LOG_DIR):
+        raise click.BadParameter(f"no such log: {name}")
+    return path
+
+
+@cli.command("clear-log")
+@click.option("--name", "-n", type=str, help="The log file in data/log, e.g. 0-install.log", required=True)
+def clear_log(name: str):
+    """Empty a log in place (its writers keep their file): the panel's user can not write the root-owned ones."""
+    with open(log_path(name), "r+b") as fh:
+        fh.truncate(0)
+
+
+@cli.command("update-usage")
+def update_usage():
+    cmd = [Command.update_usage.value]
+    run(cmd)
+
+
+@cli.command("apply-users")
+@click.option("--domain", is_flag=True, help="Domains changed: also restart the services that cannot hot-reload them.")
+@click.option("--users-only", is_flag=True, help="Only users changed, already given to xray through its API: do not reload xray.")
+def apply_users(domain, users_only):
+    cmd = [Command.apply_users.value]
+    if domain:
+        cmd.append("domain")
+    elif users_only:
+        cmd.append("users")
+    run(cmd, unit="hiddify-apply-users", wait_if_active=True)
+
+
+@cli.command("update-wg-usage")
+def update_wg_usage():
+    try:
+        wg_raw_output = subprocess.check_output(
+            ["wg", "show", "hiddifywg", "transfer"],
+            stderr=subprocess.DEVNULL,
+        )
+        print(wg_raw_output.decode())
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # Interface not up yet (common in Docker / before wg-quick).
+        pass
+
+
+if __name__ == "__main__":
+    cli()

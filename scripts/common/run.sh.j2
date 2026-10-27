@@ -1,0 +1,50 @@
+source /opt/hiddify-manager/scripts/common/utils.sh
+
+if [ "$MODE" != "docker" ];then
+  if [[ '{{hconfigs['country']}}' == 'cn' ]]; then
+      TIMEZONE=Asia/Shanghai
+  elif [[ '{{hconfigs['country']}}' == 'ru' ]]; then
+      TIMEZONE=Europe/Moscow
+  else
+      TIMEZONE=Asia/Tehran
+  fi
+  CURRENT_TZ=$(timedatectl show --property=Timezone --value)
+  if [[ "$CURRENT_TZ" != "$TIMEZONE" ]]; then
+      echo "Current timezone is $CURRENT_TZ. Changing to $TIMEZONE..."
+      sudo timedatectl set-timezone "$TIMEZONE"
+      sudo systemctl restart hiddify-mysql
+  fi
+fi
+
+# Logs must not fill the disk: cap the journal, empty a file log once it passes 100M.
+if [ "$MODE" != "docker" ];then
+  mkdir -p /etc/systemd/journald.conf.d
+  if ! cmp -s journald.conf /etc/systemd/journald.conf.d/hiddify.conf; then
+    cp journald.conf /etc/systemd/journald.conf.d/hiddify.conf
+    systemctl restart systemd-journald
+  fi
+  cp logrotate.conf /etc/logrotate.d/hiddify
+  chmod 644 /etc/logrotate.d/hiddify
+  echo "17 * * * * root /usr/sbin/logrotate /etc/logrotate.d/hiddify >/dev/null 2>&1" >/etc/cron.d/hiddify_logrotate
+fi
+
+# Check if PasswordAuthentication is enabled
+if ! grep -rxq "PasswordAuthentication.*no" /etc/ssh/sshd*; then
+  chmod a+r /etc/ssh/sshd*
+  WARNING_MSG="Hiddify! Your server is vulnerable to abuses because PasswordAuthentication is enabled. To secure your server, please switch to key authentication mechanism and turn off PasswordAuthentication in your ssh config file."
+  
+  if [[ $(grep "Your server is vulnerable" /etc/motd | wc -l) == 0 ]]; then
+    error "$WARNING_MSG" >>/etc/motd 2>&1
+  fi
+else
+  sed -i "/Your server is vulnerable/d" /etc/motd
+fi
+
+
+{% if hconfigs['auto_update'] %}
+echo "0 3 * * * root $(pwd)/../update.sh --no-gui --no-log" >/etc/cron.d/hiddify_auto_update
+service cron reload
+{%else%}
+rm -rf /etc/cron.d/hiddify_auto_update
+service cron reload
+{%endif%}
